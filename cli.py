@@ -187,6 +187,20 @@ def write_launch_request(connection='auto',serial=None):
     finally:
         Path(path).unlink(missing_ok=True)
 
+def wait_for_start():
+    deadline = time.monotonic() + 40
+    while time.monotonic() < deadline:
+        state = current_status()
+        if state.get('running'):
+            return
+        if state.get('state') in ('error', 'disconnected'):
+            raise CliError(state.get('error') or 'The iPhone disconnected during startup.')
+        if state.get('state') == 'stopped':
+            raise CliError('The viewer stopped before opening. Check the iPhone connection.')
+        time.sleep(.2)
+    raise CliError('Startup is taking too long. Check the unlocked phone and run iphone-mirror status.')
+
+
 def start(connection=None, serial=None) -> None:
     if service_is_active(LEGACY_SERVICE):
         raise CliError(
@@ -197,10 +211,14 @@ def start(connection=None, serial=None) -> None:
         if ((connection is not None and connection not in ('auto',state.get('connection'),state.get('requested_connection')))
                 or (serial is not None and serial != state.get('serial'))):
             raise CliError('The mirror is running in another mode. Stop it before selecting a different mode.')
+        # A second launch while the first is still connecting just waits for it.
+        if not current_status().get('running'):
+            wait_for_start()
         send_command("focus")
         return
     write_launch_request(connection or 'auto',serial)
     _systemctl("start", SERVICE)
+    wait_for_start()
 
 
 def stop() -> None:
@@ -222,7 +240,7 @@ def restart(connection=None, serial=None) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="iphone-mirror")
-    parser.add_argument("command", choices=("start", "stop", "restart", "status", "reload-ui"))
+    parser.add_argument("command", choices=("start", "stop", "restart", "status", "reload-ui", "home"))
     parser.add_argument('--connection',choices=('usb','wifi','auto'))
     parser.add_argument('--serial',help='Select a paired iPhone')
     return parser
@@ -233,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if (args.connection is not None or args.serial is not None) and args.command not in ('start','restart'):
         parser.error('Connection options require start or restart')
+    launched_at = time.monotonic()
     try:
         if args.command == "start":
             if args.connection is None and args.serial is None:
@@ -246,16 +265,22 @@ def main(argv: list[str] | None = None) -> int:
                 restart()
             else:
                 restart(args.connection,args.serial)
-        elif args.command == "reload-ui":
+        elif args.command in ("reload-ui", "home"):
             if not service_is_active():
                 raise CliError("the mirror is not running")
-            send_command("reload-ui")
+            send_command(args.command)
         else:
             status = current_status()
             print(json.dumps(status, separators=(",", ":")))
             return 0
     except CliError as exc:
         print(f"iphone-mirror: {exc}", file=sys.stderr)
+        if args.command in ('start', 'restart'):
+            # Omarchy shows its generic launch OSD after two seconds. Replace it
+            # after that delay even when startup fails immediately.
+            time.sleep(max(0, 2.3 - (time.monotonic() - launched_at)))
+            from local_feedback import show_error
+            show_error(str(exc))
         return 1
     return 0
 

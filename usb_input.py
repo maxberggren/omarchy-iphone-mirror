@@ -15,7 +15,7 @@ from pymobiledevice3.remote.core_device.hid_service import (
     UniversalHIDServiceService, TOUCHSCREEN_STATE_CONTACT, TOUCHSCREEN_STATE_RELEASE,
     IndigoHIDService, HID_BUTTON_STATE_DOWN, HID_BUTTON_STATE_UP,
 )
-from pymobiledevice3.remote.core_device.vnc_server import ASCII_TO_HID
+import keyboard_layouts
 from pymobiledevice3.remote.core_device.pasteboard_service import PasteboardService
 
 SPECIAL = {'SPACE': 44, 'ENTER': 40, 'KP_ENTER': 40, 'BS': 42,
@@ -24,6 +24,7 @@ SPECIAL = {'SPACE': 44, 'ENTER': 40, 'KP_ENTER': 40, 'BS': 42,
            'HOME': 74, 'END': 77, 'PGUP': 75, 'PGDWN': 78}
 MODS = {'Ctrl': 224, 'Shift': 225, 'Alt': 226, 'Meta': 227}
 TOOLBAR_RATIO = 0.08
+HOME_STRIP = round(65535 * .96)  # home-indicator strip: bottom 4% of the screen
 
 def input_bindings():
     keys = ('UNMAPPED', 'ANY_UNICODE', 'MBTN_LEFT', 'WHEEL_UP', 'WHEEL_DOWN')
@@ -66,26 +67,32 @@ def load_ui():
     return defaults
 
 def toolbar_action(mouse, dimensions):
-    w, h = dimensions.get('w', 0), dimensions.get('h', 0)
-    x, y = mouse.get('x', -1), mouse.get('y', -1)
-    if (mouse.get('hover') and w > 0 and h > 0
-            and 0 <= x < w and h*(1-TOOLBAR_RATIO) <= y < h):
-        return 'home' if x < w/2 else 'search'
     return None
 
-def key_usages(name, text=''):
+US_LAYOUT = keyboard_layouts.load('us')
+
+def key_chords(name, text='', layout=None):
+    """Shortcut modifiers and the phone key presses for one viewer key event.
+
+    The viewer reports finished characters; `layout` (see keyboard_layouts)
+    says which key positions produce them on the phone. Dead-key characters
+    come back as more than one chord.
+    """
     mods = set()
     while '+' in name and name.split('+', 1)[0] in MODS:
         prefix, name = name.split('+', 1)
         mods.add(MODS[prefix])
     if name in SPECIAL:
-        return mods | {SPECIAL[name]}
+        return mods, [(SPECIAL[name], frozenset())]
     char = text if len(text) == 1 and not mods else name
-    mapping = ASCII_TO_HID.get(char)
-    if mapping is None:
+    return mods, (US_LAYOUT if layout is None else layout).get(char) or []
+
+def key_usages(name, text='', layout=None):
+    mods, chords = key_chords(name, text, layout)
+    if len(chords) != 1:
         return set()
-    usage, shift = mapping
-    return mods | {usage} | ({225} if shift else set())
+    usage, chord_mods = chords[0]
+    return mods | {usage} | set(chord_mods)
 
 def touch_position(mouse, dimensions, clamp=False):
     if not mouse or not dimensions:
@@ -102,6 +109,14 @@ def touch_position(mouse, dimensions, clamp=False):
     return (round(max(0, min(1, x/(width-1)))*65535),
             round(max(0, min(1, y/(height-1)))*65535))
 
+def below_video(mouse, dimensions):
+    """Pointer is inside the window but under the picture (bottom letterbox)."""
+    if not mouse or not dimensions or not mouse.get('hover', False):
+        return False
+    bottom = dimensions.get('h', 0) - dimensions.get('mb', 0)
+    left, right = dimensions.get('ml', 0), dimensions.get('w', 0) - dimensions.get('mr', 0)
+    return mouse.get('y', -1) >= bottom and left <= mouse.get('x', -1) < right
+
 class InputBridge:
     def __init__(self, rsd, socket_path):
         self.rsd, self.socket_path = rsd, socket_path
@@ -117,6 +132,9 @@ class InputBridge:
         self.mouse = {}
         self.dimensions = {}
         self.contact = None
+        self.home_drag = None
+        self.home_tap = None
+        self.layout = None  # US until run() loads the configured phone layout
         self.held = {}
         self.reported_keys = set()
         self.gesture_task = None
@@ -155,28 +173,8 @@ class InputBridge:
             self.gesture_task = None
 
     async def draw_toolbar(self):
-        w, h = self.dimensions.get('w', 0), self.dimensions.get('h', 0)
-        if w <= 0 or h <= 0:
-            return
-        top = round(h*(1-TOOLBAR_RATIO))
-        center = (top+h)/2
-        # ASS vector background and Home icon in the reserved margin.
-        background = (r'{\an7\pos(0,0)\bord0\shad0\1c&H252525&\p1}'
-                      f'm 0 {top} l {w} {top} {w} {h} 0 {h}')
-        # Draw a house without relying on an installed icon font.
-        ui = load_ui()
-        size = min(ui['icon_size'], (h-top)*.45)
-        scale = size/24
-        spacing = min(ui['button_spacing'], w*.2)
-        x, y = w/2-spacing/2-size/2, center-size/2
-        icon = (rf'{{\an7\pos({x},{y})\bord0\shad0\1c&HFFFFFF&\fscx{scale*100}\fscy{scale*100}\p1}}'
-                'm 12 1 l 1 11 3 13 5 11 5 23 10 23 10 16 14 16 14 23 19 23 19 11 21 13 23 11 12 1')
-        search_x = w/2+spacing/2-size/2
-        search = (rf'{{\an7\pos({search_x},{y})\bord2\shad0\1a&HFF&\3c&HFFFFFF&\fscx{scale*100}\fscy{scale*100}\p1}}'
-                  'm 10 2 b 5.6 2 2 5.6 2 10 b 2 14.4 5.6 18 10 18 '
-                  'b 14.4 18 18 14.4 18 10 b 18 5.6 14.4 2 10 2 '
-                  'm 16 16 l 23 23')
-        await self.command('osd-overlay', 61, 'ass-events', '\n'.join([background,icon,search]), w, h)
+        # No reserved strip, overlay, or toolbar hit targets in the local UI.
+        return
 
     async def search_button(self):
         """Request Spotlight with Command+Space; no touch gesture."""
@@ -210,6 +208,13 @@ class InputBridge:
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(self.indigo.send_button(0x0C, 0x40, HID_BUTTON_STATE_UP), 1)
             self.gesture_task = None
+
+    async def press_home(self):
+        """Home press requested from outside the viewer (control socket)."""
+        if not self.enabled or self.gesture_task is not None:
+            raise RuntimeError('busy')
+        await self.release()
+        self.gesture_task = asyncio.create_task(self.home_button())
 
     async def command(self, *args):
         self.writer.write((json.dumps({'command': list(args)})+'\n').encode())
@@ -289,6 +294,17 @@ class InputBridge:
                 if modifiers_changed and state != desired:
                     await asyncio.sleep(.005)
 
+    async def type_chords(self, mods, chords):
+        await self.ensure_hid()
+        if self.keyboard is None:
+            self.keyboard = await self.hid.create_keyboard_service()
+        self.held.clear()
+        for usage, chord_mods in chords:
+            await self.report_keys(set())
+            await self.report_keys(set(mods) | set(chord_mods) | {usage})
+            await asyncio.sleep(.03)
+        await self.report_keys(set())
+
     async def release(self):
         self.scroll_pending = 0.0
         if self.gesture_task is not None:
@@ -297,6 +313,8 @@ class InputBridge:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self.scrolling = False
+        self.home_drag = None
+        self.home_tap = None
         self.held.clear()
         if self.hid is not None:
             if self.contact is not None:
@@ -368,6 +386,12 @@ class InputBridge:
                 self.scrolling = True
                 self.gesture_task = asyncio.create_task(self.scroll_wheel())
             return
+        if name == 'ESC':
+            # Escape = Home button (modified Escape still reaches the phone).
+            if action in ('d', 'p') and self.gesture_task is None:
+                await self.release()
+                self.gesture_task = asyncio.create_task(self.home_button())
+            return
         if name == 'MBTN_LEFT':
             if self.gesture_task is not None:
                 return
@@ -379,10 +403,31 @@ class InputBridge:
                     self.gesture_task = asyncio.create_task(task)
                     return
                 pos = touch_position(self.mouse, self.dimensions)
-                if pos is not None:
+                # Drag up from the home-indicator strip, or from under the
+                # picture, = Home. iOS ignores injected edge swipes, so press
+                # the button instead. A press in the strip is held back until
+                # release so a plain click there still arrives as a tap.
+                if action == 'd' and pos is not None and pos[1] >= HOME_STRIP:
+                    self.home_drag, self.home_tap = self.mouse.get('y'), pos
+                elif pos is not None:
                     await self.ensure_hid()
                     self.contact = pos
                     await self.hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT, *pos)
+                elif below_video(self.mouse, self.dimensions):
+                    self.home_drag = self.mouse.get('y')
+            if action == 'u' and self.home_drag is not None:
+                start, self.home_drag = self.home_drag, None
+                tap, self.home_tap = self.home_tap, None
+                d = self.dimensions
+                height = d.get('h', 0) - d.get('mt', 0) - d.get('mb', 0)
+                if start - self.mouse.get('y', start) >= max(40, height * .08):
+                    self.gesture_task = asyncio.create_task(self.home_button())
+                elif tap is not None:
+                    await self.ensure_hid()
+                    await self.hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT, *tap)
+                    await asyncio.sleep(.03)
+                    await self.hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, *tap)
+                return
             if action in ('u', 'p') and self.contact is not None:
                 pos, self.contact = self.contact, None
                 await self.hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, *pos)
@@ -390,10 +435,15 @@ class InputBridge:
         # Do not mix typed keys into a toolbar shortcut in progress.
         if self.gesture_task is not None and not self.scrolling:
             return
-        # Only ASCII text and the explicitly listed navigation keys for now.
         if action not in ('d', 'u', 'p'):
             return
-        usages = key_usages(name, text)
+        mods, chords = key_chords(name, text, self.layout)
+        if len(chords) > 1:
+            # Dead-key character (e.g. 'è', '~'): typed once, never held.
+            if action in ('d', 'p'):
+                await self.type_chords(mods, chords)
+            return
+        usages = key_usages(name, text, self.layout)
         # Match releases by HID key, not display text: Shift+A can be released
         # as 'a' if Shift is released first. Modifier-only events stay local.
         identity = tuple(sorted(u for u in usages if not 224 <= u <= 231))
@@ -403,6 +453,13 @@ class InputBridge:
         if self.keyboard is None:
             self.keyboard = await self.hid.create_keyboard_service()
         if action in ('d', 'p'):
+            # Characters carry their own Shift/Option. When fast typing overlaps
+            # two keys, let go of earlier ones that need different modifiers so
+            # they cannot leak onto this character ("Hi" must not become "HI").
+            new_mods = {u for u in usages if 224 <= u <= 231}
+            for other, held in list(self.held.items()):
+                if {u for u in held if 224 <= u <= 231} != new_mods:
+                    del self.held[other]
             self.held[identity] = usages
         else:
             self.held.pop(identity, None)
@@ -458,6 +515,7 @@ class InputBridge:
                 await asyncio.sleep(.1)
         else:
             raise RuntimeError('Viewer input socket did not become available')
+        self.layout = await asyncio.to_thread(keyboard_layouts.load)
         for i, name in enumerate(('focused', 'mouse-pos', 'osd-dimensions')):
             await self.command('observe_property', i, name)
         # Preserve window-manager close requests instead of forwarding them.

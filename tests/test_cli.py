@@ -19,9 +19,10 @@ class CliTests(unittest.TestCase):
     def completed(self, code=0, stdout="", stderr=""):
         return subprocess.CompletedProcess([], code, stdout, stderr)
 
+    @mock.patch("cli.current_status", return_value={"running": True})
     @mock.patch("cli.send_command")
     @mock.patch("cli.subprocess.run")
-    def test_start_focuses_an_active_service(self, run, send_command):
+    def test_start_focuses_an_active_service(self, run, send_command, _status):
         run.side_effect = [self.completed(3), self.completed(0)]
 
         cli.start()
@@ -40,8 +41,19 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(run.call_count, 1)
 
+    @mock.patch("cli.wait_for_start")
+    @mock.patch("cli.current_status", return_value={"running": False, "state": "starting"})
+    @mock.patch("cli.send_command")
     @mock.patch("cli.subprocess.run")
-    def test_start_uses_user_systemd_when_stopped(self, run):
+    def test_second_launch_waits_for_a_starting_service(self, run, send_command, _status, wait):
+        run.side_effect = [self.completed(3), self.completed(0)]
+        cli.start()
+        wait.assert_called_once_with()
+        send_command.assert_called_once_with("focus")
+
+    @mock.patch("cli.wait_for_start")
+    @mock.patch("cli.subprocess.run")
+    def test_start_uses_user_systemd_when_stopped(self, run, _wait):
         run.side_effect = [self.completed(3), self.completed(3), self.completed(0)]
 
         cli.start()
@@ -147,8 +159,9 @@ class CliTests(unittest.TestCase):
         with mock.patch('sys.stdout',io.StringIO()):
             self.assertEqual(cli.main(['status']),0)
 
+    @mock.patch('cli.wait_for_start')
     @mock.patch('cli.subprocess.run')
-    def test_wifi_launch_request(self, run):
+    def test_wifi_launch_request(self, run, _wait):
         run.side_effect=[self.completed(3),self.completed(3),self.completed(0)]
         cli.start('wifi','device')
         self.write_request.assert_called_once_with('wifi','device')

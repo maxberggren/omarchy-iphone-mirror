@@ -31,10 +31,10 @@ class DirectPlayer:
         self.on_stop = on_stop
         self.player = subprocess.Popen([
             'mpv', '--no-config', '--profile=low-latency',
-            '--title=iPhone — Mirror', '--geometry=400x870',
+            '--title=iPhone — Mirror', '--wayland-app-id=iphone-mirror', '--x11-name=iphone-mirror',
             '--input-ipc-server='+str(ipc_path), '--osc=no',
             '--cursor-autohide=no', '--input-vo-keyboard=yes',
-            '--video-margin-ratio-bottom=0.08',
+            '--video-margin-ratio-bottom=0',
             '--input-cursor=yes', '--window-dragging=no',
             '--input-builtin-dragging=no', '--input-builtin-bindings=no',
             '--load-scripts=no', '--no-audio', '--untimed', '--cache=no',
@@ -151,6 +151,10 @@ class Mirror:
                         break
                 else:
                     raise RuntimeError('focus-failed')
+            elif command == 'home':
+                if self.bridge is None or self.bridge.writer is None:
+                    raise RuntimeError('not-ready')
+                await self.bridge.press_home()
             elif command == 'reload-ui':
                 if self.bridge is None or self.bridge.writer is None:
                     raise RuntimeError('not-ready')
@@ -257,7 +261,8 @@ class Mirror:
             if capture in done:
                 await capture
         except Exception as error:
-            self.error = self.error or 'Connection failed ('+type(error).__name__+'). Check the connection, pairing, Developer Mode and developer image.'
+            from local_feedback import message_for
+            self.error = self.error or message_for(error)
             log.error('Capture failed (%s)', type(error).__name__)
         finally:
             # A stop signal also wakes capture's loop. Do not cancel its

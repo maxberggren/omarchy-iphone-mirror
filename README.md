@@ -1,5 +1,23 @@
 # Omarchy iPhone Mirror
 
+> **This is Max's fork** of [DanielLemky/omarchy-iphone-mirror](https://github.com/DanielLemky/omarchy-iphone-mirror), branch `max-setup`.
+>
+> Install this fork from a clone (the online installer below still fetches upstream releases):
+>
+> ```sh
+> git clone https://github.com/maxberggren/omarchy-iphone-mirror.git
+> cd omarchy-iphone-mirror
+> ./install.sh          # the application
+> ./install-hypr.sh     # optional: Hyprland Home-drag gesture (no keybindings)
+> ```
+>
+> What differs from upstream:
+>
+> - **Home without the toolbar.** iOS ignores injected edge swipes, so Home is a button press triggered by: `Escape`; dragging up from the bottom 4% of the phone picture (a plain click there is still a tap); dragging up from the letterbox under the picture; dragging up from the gap below the window (`hypr/iphone-mirror.lua`); or `iphone-mirror home`. The reserved toolbar strip is gone.
+> - **Phone keyboard layouts.** The viewer receives characters, but the virtual keyboard sends key positions that iOS interprets with the layout of the phone's language. `keyboard_layouts.py` maps characters to positions for that layout (`us`, and a measured `se` including Option symbols and dead keys), so `åäö`, `@`, `-` and friends arrive correctly. Set `"keyboard_layout": "us" | "se" | "auto"` in `~/.config/iphone-mirror/ui.json`; `auto` (default) assumes the phone uses the desktop's layout. `tools/probe_layout.py` measures any phone's layout.
+> - **Overlapping keys** no longer leak Shift/Option onto the next character.
+> - **Errors are notifications** with the full message instead of a truncated OSD line, and a second launch while the first is still connecting waits instead of failing.
+
 An on-demand USB or Wi-Fi mirror application with an optional Omarchy bar plugin.
 
 **Early alpha — limited device compatibility.** Tested on ARM64 Omarchy with an iPhone 13 running iOS 27. Intel support is not verified.
