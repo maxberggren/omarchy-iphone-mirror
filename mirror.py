@@ -33,6 +33,8 @@ class DirectPlayer:
             'mpv', '--no-config', '--profile=low-latency',
             '--title=iPhone — Mirror', '--wayland-app-id=iphone-mirror', '--x11-name=iphone-mirror',
             '--input-ipc-server='+str(ipc_path), '--osc=no',
+            # Player diagnostics only (no screen contents); private tmpfs, replaced per run.
+            '--log-file='+str(ipc_path.with_name('mpv.log')),
             '--cursor-autohide=no', '--input-vo-keyboard=yes',
             '--video-margin-ratio-bottom=0',
             '--input-cursor=yes', '--window-dragging=no',
@@ -67,6 +69,7 @@ class DirectPlayer:
                 except queue.Empty:
                     if self.player.poll() is not None:
                         if not self._stop.is_set():
+                            log.warning('Viewer exited by itself (code %s)', self.player.returncode)
                             self.on_stop(None if self.player.returncode == 0 else 'player-exited')
                         return
                     continue
@@ -76,8 +79,9 @@ class DirectPlayer:
                     if not n:
                         raise BrokenPipeError()
                     remaining = remaining[n:]
-        except (BrokenPipeError, OSError):
+        except (BrokenPipeError, OSError) as error:
             if not self._stop.is_set():
+                log.warning('Viewer stopped reading video (%s)', type(error).__name__)
                 self.on_stop(None)
 
     def close(self):
@@ -135,6 +139,7 @@ class Mirror:
             request = json.loads(line)
             command = request.get('command')
             if command == 'stop':
+                log.warning('Stop requested over the control socket')
                 self.stop()
             elif command == 'focus':
                 if self.player is None or self.player.player.poll() is not None:
@@ -228,6 +233,7 @@ class Mirror:
                             log.error('Input service failed (%s)', type(input_task.exception()).__name__)
                             self.stop('input-service-failed')
                         else:
+                            log.warning('Viewer input channel closed; stopping')
                             self.stop()
                         break
                     if tasks[0].done():
@@ -252,8 +258,11 @@ class Mirror:
 
     async def run(self):
         server = await asyncio.start_unix_server(self.controls, path=str(self.runtime.root/'control.sock'), limit=4096)
+        def on_signal():
+            log.warning('Stop signal received')
+            self.stop()
         for sig in (signal.SIGTERM, signal.SIGINT):
-            self.loop.add_signal_handler(sig, self.stop)
+            self.loop.add_signal_handler(sig, on_signal)
         capture = asyncio.create_task(self.capture())
         stopping = asyncio.create_task(self.stop_event.wait())
         try:
