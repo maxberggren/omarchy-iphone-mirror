@@ -143,10 +143,14 @@ def current_status() -> dict[str, Any]:
     process_valid = main_pid > 0 and pid == main_pid and pid_is_alive(pid)
     declared_running = state.get("running") is True and state.get("state") == "running"
     if not process_valid:
+        # The service may have exited between the checks above. Look again so
+        # the error it saved is reported instead of this bookkeeping state.
+        if not service_is_active():
+            return current_status()
         return {
             "running": False,
             "state": "error",
-            "error": "state file refers to a stale process",
+            "error": "iPhone Mirror stopped unexpectedly. Open it again.",
             "pid": pid,
         }
 

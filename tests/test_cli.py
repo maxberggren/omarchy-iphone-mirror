@@ -41,6 +41,12 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(run.call_count, 1)
 
+    @mock.patch("cli._read_state", return_value={"running": False, "state": "error", "error": "saved reason", "pid": 41})
+    @mock.patch("cli.service_main_pid", return_value=0)
+    @mock.patch("cli.service_is_active", side_effect=[True, False, False])
+    def test_service_exit_during_status_reports_saved_error(self, _active, _pid, _state):
+        self.assertEqual(cli.current_status()["error"], "saved reason")
+
     @mock.patch("cli.wait_for_start")
     @mock.patch("cli.current_status", return_value={"running": False, "state": "starting"})
     @mock.patch("cli.send_command")
@@ -119,7 +125,7 @@ class CliTests(unittest.TestCase):
 
         self.assertFalse(status["running"])
         self.assertEqual(status["state"], "error")
-        self.assertIn("stale", status["error"])
+        self.assertIn("stopped unexpectedly", status["error"])
 
     @mock.patch('cli.pid_is_alive',return_value=True)
     @mock.patch('cli.service_main_pid',return_value=456)
