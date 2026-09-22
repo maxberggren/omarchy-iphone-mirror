@@ -44,6 +44,26 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await connection.wifi_provider(None),(provider,None))
             connect.assert_awaited_once_with('phone','192.0.2.1',123)
 
+    async def test_wifi_keeps_browsing_while_locked_phone_answers_slowly(self):
+        answer=SimpleNamespace(port=123,addresses=[SimpleNamespace(full_ip='192.0.2.1')])
+        provider=Mock()
+        with patch('connection.iter_remote_paired_identifiers',return_value=['phone']), \
+             patch('connection.browse_remotepairing',AsyncMock(side_effect=[[],[],[answer]])) as browse, \
+             patch('connection.network_route_allowed',AsyncMock(return_value=True)), \
+             patch('connection.connect_wifi',AsyncMock(return_value=provider)) as connect:
+            self.assertEqual(await connection.wifi_provider(None),(provider,None))
+            self.assertEqual(browse.await_count,3)
+            connect.assert_awaited_once_with('phone','192.0.2.1',123)
+
+    async def test_wifi_gives_up_after_bounded_browse_rounds(self):
+        with patch('connection.iter_remote_paired_identifiers',return_value=['phone']), \
+             patch('connection.browse_remotepairing',AsyncMock(return_value=[])) as browse, \
+             patch('connection.connect_wifi',AsyncMock()) as connect:
+            with self.assertRaises(RuntimeError):
+                await connection.wifi_provider(None)
+            self.assertEqual(browse.await_count,connection.BROWSE_ROUNDS)
+            connect.assert_not_called()
+
     async def test_no_pairing_does_not_attempt_connection(self):
         with patch('connection.iter_remote_paired_identifiers',return_value=[]), \
              patch('connection.browse_remotepairing',AsyncMock()) as browse:

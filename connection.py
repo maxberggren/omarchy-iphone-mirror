@@ -65,6 +65,20 @@ async def connect_wifi(identifier, address, port):
             await asyncio.wait_for(service.close(),1)
         raise
 
+BROWSE_ROUNDS = 4
+BROWSE_ROUND_SECONDS = 4
+
+async def browse_until_found():
+    """A locked iPhone answers multicast discovery slowly, often after more than
+    four seconds. Browse in short rounds and return the first non-empty result,
+    so an awake phone is found quickly and a dozing one still gets ~16 s."""
+    answers = []
+    for _ in range(BROWSE_ROUNDS):
+        answers = await browse_remotepairing(timeout=BROWSE_ROUND_SECONDS)
+        if answers:
+            break
+    return answers
+
 async def wifi_provider(serial, autopair=False, remotepairing_fallback=False):
     identifiers = list(iter_remote_paired_identifiers())
     if serial:
@@ -74,7 +88,7 @@ async def wifi_provider(serial, autopair=False, remotepairing_fallback=False):
     if len(identifiers)>1:
         raise RuntimeError('Several pairing records exist. Select an iPhone with --serial.')
     identifier = identifiers[0]
-    answers = await browse_remotepairing(timeout=4)
+    answers = await browse_until_found()
     endpoints = {(a.full_ip, answer.port) for answer in answers for a in answer.addresses}
     # Prefer IPv4; deduplicate repeated multicast advertisements.
     endpoints = sorted(endpoints,key=lambda ep:(':' in ep[0],ep[0],ep[1]))

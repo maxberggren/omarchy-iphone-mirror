@@ -169,6 +169,8 @@ def current_status() -> dict[str, Any]:
     }
     if state.get('connection') in ('usb','wifi'):
         result['connection'] = state['connection']
+    if state.get('phase') == 'mounting':
+        result['phase'] = 'mounting'
     player_pid = state.get("player_pid")
     if isinstance(player_pid, int) and not isinstance(player_pid, bool):
         result["player_pid"] = player_pid
@@ -191,10 +193,22 @@ def write_launch_request(connection='auto',serial=None):
     finally:
         Path(path).unlink(missing_ok=True)
 
+START_TIMEOUT = 40
+MOUNT_TIMEOUT = 220  # the viewer's 180 s mount budget plus tunnel reconnects
+
+
+def start_deadline(state, deadline, now):
+    """Mounting the developer image can take minutes; allow it once the viewer reports it."""
+    if state.get('phase') == 'mounting':
+        return max(deadline, now + MOUNT_TIMEOUT)
+    return deadline
+
+
 def wait_for_start():
-    deadline = time.monotonic() + 40
+    deadline = time.monotonic() + START_TIMEOUT
     while time.monotonic() < deadline:
         state = current_status()
+        deadline = start_deadline(state, deadline, time.monotonic())
         if state.get('running'):
             return
         if state.get('state') in ('error', 'disconnected'):

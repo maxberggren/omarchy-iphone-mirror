@@ -20,6 +20,29 @@ from usb_input import InputBridge
 
 log = logging.getLogger('iphone-mirror')
 
+DISPLAY_SERVICE = 'com.apple.coredevice.displayservice'
+MOUNT_TIMEOUT = 180
+
+def auto_mount_enabled():
+    """`"auto_mount_image": false` in ui.json keeps the viewer from mounting."""
+    path = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home()/'.config')))/'iphone-mirror/ui.json'
+    try:
+        return json.loads(path.read_text()).get('auto_mount_image', True) is not False
+    except (OSError, ValueError, AttributeError):
+        return True
+
+def display_service_offered(rsd):
+    """None when the handshake data is unavailable; never guess about the phone."""
+    services = getattr(rsd, 'peer_info', None)
+    if not isinstance(services, dict) or not isinstance(services.get('Services'), dict):
+        return None
+    return DISPLAY_SERVICE in services['Services']
+
+def require_display_service(rsd):
+    if display_service_offered(rsd) is False:
+        raise RuntimeError('The mounted image does not expose the display service.')
+
+
 class DirectPlayer:
     def __init__(self, vps, sps, pps, *, ipc_path, on_stop, on_ready,
                  on_frame=None, on_decode_error=None):
@@ -176,6 +199,32 @@ class Mirror:
         finally:
             writer.close()
 
+    async def mount_image_if_missing(self, rsd):
+        """iOS unmounts the developer image on every restart. Mount the cached
+        image over the current connection when the phone offers no display
+        service. Never unmounts or replaces an image; returns True after a mount."""
+        if display_service_offered(rsd) is not False:
+            return False
+        if not auto_mount_enabled():
+            raise RuntimeError('Developer image is not mounted.')
+        from local_feedback import show_notice
+        from pymobiledevice3.services.mobile_image_mounter import auto_mount
+        log.warning('Developer image missing; mounting it')
+        self.runtime.update('starting', phase='mounting')
+        show_notice('Mounting the developer image. Keep the iPhone unlocked.')
+        try:
+            await asyncio.wait_for(auto_mount(rsd), MOUNT_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise RuntimeError('Mounting the developer image timed out.') from None
+        except Exception as error:
+            if 'DeviceLocked' in str(error):
+                raise
+            log.error('Mounting failed (%s)', type(error).__name__)
+            raise RuntimeError('Mounting the developer image failed.') from None
+        finally:
+            self.runtime.update('starting', phase=None)
+        return True
+
     async def capture(self):
         from connection import select_connection, get_tunnel
         from pymobiledevice3.remote.core_device.display_service import DisplayService
@@ -187,74 +236,79 @@ class Mirror:
         # Our orchestration owns and cancels only the tasks it creates.
         mode, serial = await select_connection(self.connection,self.serial)
         self.runtime.update('starting', connection=mode, requested_connection=self.connection, serial=serial)
-        async with get_tunnel(mode,serial) as rsd:
-            service = None
-            transport = None
-            receiver = None
-            tasks = []
-            input_task = None
-            try:
-                service = await connect_service(lambda: DisplayService(rsd))
-                raw, receiver_ip = open_media_receiver(service, (8*1024*1024,4*1024*1024))
-                transport = TrackedTransport(raw)
-                self.session_id = uuid.uuid4()
-                answer = await asyncio.wait_for(service.start_video_stream(
-                    receiver_ip=receiver_ip, receiver_port=transport.port,
-                    sender_ip=rsd.service.address[0], display_id=1,
-                    client_session_id=self.session_id, allow_rtcp_fb=False,
-                    ltrp_enabled=False), 12)
-                sid = answer['connection']['options']['avcMediaStreamOptionClientSessionID']['uuid']
-                self.session_id = sid if isinstance(sid, uuid.UUID) else uuid.UUID(sid)
-                receiver = VncStreamServer(rsd, bind='127.0.0.1', audio=False, decoder='av')
-                receiver._transcoder_cls = lambda *args, **kwargs: DirectPlayer(
-                    *args, **kwargs, ipc_path=self.runtime.root/'mpv.sock',
-                    on_stop=self.stop, on_ready=self.ready)
-                receiver._loop = self.loop
-                cfg = answer['connection'].get('streamConfig', {})
-                receiver._local_ssrc = int(cfg.get('RemoteSSRC', 0))
-                receiver._remote_ssrc = int(cfg.get('LocalSSRC', 0))
-                source_port = int(cfg.get('SourcePort', 0))
-                receiver._rtcp_dest = (rsd.service.address[0], source_port) if source_port else None
-                receiver._active_transport = transport
-                tasks = [asyncio.create_task(receiver._udp_recv_and_pipe(transport)),
-                         asyncio.create_task(receiver._rtcp_send_loop(transport))]
-                await asyncio.wait_for(self.player_ready.wait(), 15)
-                self.bridge = InputBridge(rsd, str(self.runtime.root/'mpv.sock'))
-                input_task = asyncio.create_task(self.bridge.run())
-                await asyncio.wait_for(self.bridge.ready.wait(), 12)
-                self.runtime.update('running', player_pid=self.player.player.pid)
-                while not self.stop_event.is_set():
-                    if self.runtime.state.get('error') != self.bridge.error:
-                        self.runtime.update('running', error=self.bridge.error,
-                                            player_pid=self.player.player.pid)
-                    if input_task.done():
-                        # Error type only: never exception messages, locals or keys.
-                        if not input_task.cancelled() and input_task.exception():
-                            log.error('Input service failed (%s)', type(input_task.exception()).__name__)
-                            self.stop('input-service-failed')
-                        else:
-                            log.warning('Viewer input channel closed; stopping')
-                            self.stop()
-                        break
-                    if tasks[0].done():
-                        self.stop('usb-stream-ended')
-                        break
-                    if time.monotonic()-transport.last_packet > 15:
-                        self.stop('usb-stream-timeout')
-                        break
-                    with contextlib.suppress(asyncio.TimeoutError):
-                        await asyncio.wait_for(self.stop_event.wait(), .25)
-            finally:
-                self.cleaning_up = True
-                self.runtime.update('stopping')
-                errors = await close_session(
-                    bridge=self.bridge, input_task=input_task,
-                    service=service, session_id=self.session_id,
-                    stream_tasks=tasks, player=self.player, transport=transport,
-                    pli_tasks=receiver._pli_tasks if receiver else ())
-                if errors and self.error is None:
-                    self.error = ', '.join(errors)
-                # The tunnel remains alive until ALL cleanup above has finished.
+        for attempt in range(2):
+            async with get_tunnel(mode,serial) as rsd:
+                if attempt == 0 and await self.mount_image_if_missing(rsd):
+                    continue  # a new RSD handshake is needed to see the new services
+                require_display_service(rsd)
+                service = None
+                transport = None
+                receiver = None
+                tasks = []
+                input_task = None
+                try:
+                    service = await connect_service(lambda: DisplayService(rsd))
+                    raw, receiver_ip = open_media_receiver(service, (8*1024*1024,4*1024*1024))
+                    transport = TrackedTransport(raw)
+                    self.session_id = uuid.uuid4()
+                    answer = await asyncio.wait_for(service.start_video_stream(
+                        receiver_ip=receiver_ip, receiver_port=transport.port,
+                        sender_ip=rsd.service.address[0], display_id=1,
+                        client_session_id=self.session_id, allow_rtcp_fb=False,
+                        ltrp_enabled=False), 12)
+                    sid = answer['connection']['options']['avcMediaStreamOptionClientSessionID']['uuid']
+                    self.session_id = sid if isinstance(sid, uuid.UUID) else uuid.UUID(sid)
+                    receiver = VncStreamServer(rsd, bind='127.0.0.1', audio=False, decoder='av')
+                    receiver._transcoder_cls = lambda *args, **kwargs: DirectPlayer(
+                        *args, **kwargs, ipc_path=self.runtime.root/'mpv.sock',
+                        on_stop=self.stop, on_ready=self.ready)
+                    receiver._loop = self.loop
+                    cfg = answer['connection'].get('streamConfig', {})
+                    receiver._local_ssrc = int(cfg.get('RemoteSSRC', 0))
+                    receiver._remote_ssrc = int(cfg.get('LocalSSRC', 0))
+                    source_port = int(cfg.get('SourcePort', 0))
+                    receiver._rtcp_dest = (rsd.service.address[0], source_port) if source_port else None
+                    receiver._active_transport = transport
+                    tasks = [asyncio.create_task(receiver._udp_recv_and_pipe(transport)),
+                             asyncio.create_task(receiver._rtcp_send_loop(transport))]
+                    await asyncio.wait_for(self.player_ready.wait(), 15)
+                    self.bridge = InputBridge(rsd, str(self.runtime.root/'mpv.sock'))
+                    input_task = asyncio.create_task(self.bridge.run())
+                    await asyncio.wait_for(self.bridge.ready.wait(), 12)
+                    self.runtime.update('running', player_pid=self.player.player.pid)
+                    while not self.stop_event.is_set():
+                        if self.runtime.state.get('error') != self.bridge.error:
+                            self.runtime.update('running', error=self.bridge.error,
+                                                player_pid=self.player.player.pid)
+                        if input_task.done():
+                            # Error type only: never exception messages, locals or keys.
+                            if not input_task.cancelled() and input_task.exception():
+                                log.error('Input service failed (%s)', type(input_task.exception()).__name__)
+                                self.stop('input-service-failed')
+                            else:
+                                log.warning('Viewer input channel closed; stopping')
+                                self.stop()
+                            break
+                        if tasks[0].done():
+                            self.stop('usb-stream-ended')
+                            break
+                        if time.monotonic()-transport.last_packet > 15:
+                            self.stop('usb-stream-timeout')
+                            break
+                        with contextlib.suppress(asyncio.TimeoutError):
+                            await asyncio.wait_for(self.stop_event.wait(), .25)
+                finally:
+                    self.cleaning_up = True
+                    self.runtime.update('stopping')
+                    errors = await close_session(
+                        bridge=self.bridge, input_task=input_task,
+                        service=service, session_id=self.session_id,
+                        stream_tasks=tasks, player=self.player, transport=transport,
+                        pli_tasks=receiver._pli_tasks if receiver else ())
+                    if errors and self.error is None:
+                        self.error = ', '.join(errors)
+                    # The tunnel remains alive until ALL cleanup above has finished.
+            break
 
     async def run(self):
         server = await asyncio.start_unix_server(self.controls, path=str(self.runtime.root/'control.sock'), limit=4096)

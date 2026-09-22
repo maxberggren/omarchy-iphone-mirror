@@ -17,6 +17,8 @@
 > - **Phone keyboard layouts.** The viewer receives characters, but the virtual keyboard sends key positions that iOS interprets with the layout of the phone's language. `keyboard_layouts.py` maps characters to positions for that layout (`us`, and a measured `se` including Option symbols and dead keys), so `åäö`, `@`, `-` and friends arrive correctly. Set `"keyboard_layout": "us" | "se" | "auto"` in `~/.config/iphone-mirror/ui.json`; `auto` (default) assumes the phone uses the desktop's layout. `tools/probe_layout.py` measures any phone's layout.
 > - **Overlapping keys** no longer leak Shift/Option onto the next character.
 > - **Errors are notifications** with the full message instead of a truncated OSD line, and a second launch while the first is still connecting waits instead of failing.
+> - **Developer image mounted on demand.** iOS unmounts the developer image every time the phone restarts. When the viewer starts and the phone offers no display service, it mounts the image over the current connection, USB or Wi-Fi, and reconnects. The phone must be unlocked; the first mount for an iOS version downloads from Apple, later mounts use the cached copy. It never unmounts or replaces an image. Set `"auto_mount_image": false` in `ui.json` to keep the viewer from mounting; phone setup over USB still does.
+> - **Wi-Fi discovery waits for a dozing phone.** A locked iPhone can take more than four seconds to answer discovery; the viewer now searches in short rounds for up to ~16 s and connects as soon as it answers.
 
 An on-demand USB or Wi-Fi mirror application with an optional Omarchy bar plugin.
 

@@ -23,18 +23,30 @@ def message_for(error):
             'No matching USB iPhone is connected.': 'No iPhone detected by USB. Unlock it and reconnect both cable ends.',
             'Several USB iPhones are connected. Select one with --serial.': 'Multiple iPhones connected. Disconnect the others and try again.',
             'No supported display features.': 'This iPhone/iOS/image combination reports no screen-sharing support.',
+            'Developer image is not mounted.': 'The developer image is not mounted. Unlock the iPhone and run phone setup over USB, or enable auto_mount_image in ui.json.',
+            'The mounted image does not expose the display service.': 'The developer image is mounted but offers no screen sharing. Check image compatibility in docs/phone-setup.md.',
+            'Mounting the developer image failed.': 'Could not mount the developer image. Unlock the iPhone, check internet access, or run phone setup over USB.',
+            'Mounting the developer image timed out.': 'Mounting the developer image took too long. Unlock the iPhone and open iPhone Mirror again.',
         }
         if str(error) in known:
             return known[str(error)]
     return 'Could not start screen sharing. Run iphone-mirror status for details; check the unlocked phone and connection.'
 
 
-def show_error(message):
+def notify(message, expire_ms):
     # A notification, not the OSD: the OSD is a one-line volume-style popup
     # that prints unknown icon names as text and cuts long messages off.
     try:
         subprocess.run(['notify-send', '--app-name=iPhone Mirror', '--icon=phone',
-                        '--expire-time=10000', 'iPhone Mirror', message],
+                        f'--expire-time={expire_ms}', 'iPhone Mirror', message],
                        timeout=4, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired):
         pass
+
+
+def show_error(message):
+    notify(message, 10000)
+
+
+def show_notice(message):
+    notify(message, 6000)

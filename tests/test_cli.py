@@ -183,5 +183,14 @@ class CliTests(unittest.TestCase):
         sleep.assert_not_called()
 
 
+
+class StartDeadlineTests(unittest.TestCase):
+    def test_mounting_phase_extends_the_start_wait_once(self):
+        import cli
+        self.assertEqual(cli.start_deadline({'state':'starting'},10,5),10)
+        self.assertEqual(cli.start_deadline({'state':'starting','phase':'mounting'},10,5),5+cli.MOUNT_TIMEOUT)
+        # Already generous deadlines are kept.
+        self.assertEqual(cli.start_deadline({'phase':'mounting'},1000,5),1000)
+
 if __name__ == "__main__":
     unittest.main()
