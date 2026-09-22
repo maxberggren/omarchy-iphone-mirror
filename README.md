@@ -188,11 +188,13 @@ Install the application first. Plugin source is in `omarchy-plugin/`. See its [i
 
 The plugin provides running/error state and start/focus/stop actions. It adds no key bindings and sends notifications only for errors. Installing the application does not change the bar layout or enable the plugin.
 
-## Paste text
+## Copy and paste text
 
 With the viewer focused, press **Ctrl + V** to copy plain text from the computer clipboard to the iPhone clipboard and send the iPhone paste shortcut. Select a text field on the phone first. The phone or target app may require paste permission.
 
-This needs `wl-paste` from `wl-clipboard` and the phone's CoreDevice pasteboard service. Text is read only for an explicit paste request, is limited to 1 MiB, and is not logged or saved to files. It is intentionally placed on the phone clipboard. Unicode text and line breaks are preserved. Images and files are not supported. Pending paste work is cancelled when the viewer loses focus; clipboard data already sent to the phone cannot be recalled.
+Press **Ctrl + C** to go the other way: the viewer sends the iPhone copy shortcut, reads the text now on the iPhone clipboard, and places it on the computer clipboard. Select text on the phone first. If nothing is selected, the phone clipboard keeps its previous contents, so Ctrl + C also fetches text you copied by touch on the phone. The viewer shows a short message when the phone clipboard holds no text.
+
+Both directions need `wl-clipboard` and the phone's CoreDevice pasteboard service. Clipboards are read only for an explicit request, text is limited to 1 MiB, and nothing is logged or saved to files. Unicode text and line breaks are preserved. Images and files are not supported. Pending work is cancelled when the viewer loses focus; clipboard data already sent to the phone cannot be recalled. Text copied to the computer is served by a `wl-copy` helper that stops with the mirror, so paste it, or rely on your clipboard history, before stopping the service.
 
 ## Toolbar appearance without restarting
 

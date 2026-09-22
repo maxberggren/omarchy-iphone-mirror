@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
-from usb_input import InputBridge, clipboard_text
+from usb_input import InputBridge, clipboard_text, set_clipboard_text
 
 class PasteTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -113,5 +113,118 @@ class PasteTests(unittest.IsolatedAsyncioTestCase):
         with patch('usb_input.asyncio.create_subprocess_exec',AsyncMock(return_value=proc)):
             with self.assertRaises(ValueError):await clipboard_text()
         proc.kill.assert_called_once()
+
+
+class CopyTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.bridge=InputBridge(None,'unused')
+        self.bridge.focused=True
+        self.bridge.hid=AsyncMock()
+        self.bridge.keyboard=512
+        self.bridge.command=AsyncMock()
+        self.service=AsyncMock()
+        self.service.get_text.return_value='Test é\nsecond line'
+
+    def reports(self):
+        return [c.args[1] for c in self.bridge.hid.send_keyboard.await_args_list]
+
+    async def test_ctrl_c_sends_command_c_then_copies_phone_text(self):
+        seen_before_read=[]
+        async def get_text():
+            seen_before_read.extend(self.reports())
+            return 'Test é\nsecond line'
+        self.service.get_text.side_effect=get_text
+        with patch('usb_input.PasteboardService',return_value=self.service), \
+             patch('usb_input.set_clipboard_text',AsyncMock()) as write:
+            await self.bridge.key('d--','Ctrl+c','c')
+            await self.bridge.gesture_task
+        # Command+C reached the phone and was released before the clipboard was read.
+        self.assertIn({227,6},seen_before_read)
+        self.assertEqual(seen_before_read[-1],set())
+        self.assertNotIn({224,6},self.reports())
+        write.assert_awaited_once_with('Test é\nsecond line')
+        self.service.close.assert_awaited_once()
+        self.assertEqual(self.reports()[-1],set())
+        self.assertIsNone(self.bridge.gesture_task)
+
+    async def test_omarchy_synthetic_sequence_copies_once(self):
+        events=[('d--','Ctrl+c'),('u-c','Ctrl+c'),('d--','c'),
+                ('u-c','c'),('d--','Ctrl+c'),('u--','Ctrl+c')]
+        with patch('usb_input.PasteboardService',return_value=self.service), \
+             patch('usb_input.set_clipboard_text',AsyncMock()) as write:
+            for state,name in events:
+                await self.bridge.key(state,name,'c')
+            await self.bridge.gesture_task
+        write.assert_awaited_once()
+        self.assertEqual([s for s in self.reports() if 6 in s],[{227,6}])
+        # A later ordinary C still types normally.
+        self.bridge.hid.send_keyboard.reset_mock()
+        await self.bridge.key('d--','c','c')
+        self.bridge.hid.send_keyboard.assert_awaited_with(512,{6})
+        await self.bridge.release()
+
+    async def test_cancelled_paste_does_not_swallow_c(self):
+        with patch('usb_input.time.monotonic',return_value=10):
+            await self.bridge.key('u-c','Ctrl+v','v')
+            await self.bridge.key('d--','c','c')
+        self.bridge.hid.send_keyboard.assert_awaited_with(512,{6})
+        await self.bridge.release()
+
+    async def test_no_phone_text_leaves_computer_clipboard_alone(self):
+        self.service.get_text.return_value=None
+        with patch('usb_input.PasteboardService',return_value=self.service), \
+             patch('usb_input.set_clipboard_text',AsyncMock()) as write:
+            await self.bridge.copy_text()
+        write.assert_not_awaited()
+        self.bridge.command.assert_awaited_with('show-text','No text on the phone clipboard.',3000)
+        self.assertTrue(self.bridge.enabled)
+
+    async def test_oversized_phone_text_is_not_copied(self):
+        self.service.get_text.return_value='x'*(1024*1024+1)
+        with patch('usb_input.PasteboardService',return_value=self.service), \
+             patch('usb_input.set_clipboard_text',AsyncMock()) as write, \
+             self.assertLogs('iphone-mirror.input',level='WARNING'):
+            await self.bridge.copy_text()
+        write.assert_not_awaited()
+        self.assertTrue(self.bridge.enabled)
+
+    async def test_unfocused_never_touches_phone(self):
+        self.bridge.focused=False
+        with patch('usb_input.PasteboardService',return_value=self.service):
+            await self.bridge.key('d--','Ctrl+c','c')
+            await self.bridge.copy_text()
+        self.bridge.hid.send_keyboard.assert_not_awaited()
+        self.service.get_text.assert_not_awaited()
+
+    async def test_keyup_and_repeat_do_not_copy(self):
+        with patch('usb_input.PasteboardService',return_value=self.service):
+            await self.bridge.key('u--','Ctrl+c','c')
+            await self.bridge.key('r--','Ctrl+c','c')
+        self.assertIsNone(self.bridge.gesture_task)
+        self.service.get_text.assert_not_awaited()
+
+    async def test_failure_does_not_log_text_or_write_clipboard(self):
+        self.service.get_text.side_effect=RuntimeError('secret phone contents')
+        with patch('usb_input.PasteboardService',return_value=self.service), \
+             patch('usb_input.set_clipboard_text',AsyncMock()) as write, \
+             self.assertLogs('iphone-mirror.input',level='WARNING') as logs:
+            await self.bridge.copy_text()
+        self.assertNotIn('secret phone contents',' '.join(logs.output))
+        write.assert_not_awaited()
+        self.assertTrue(self.bridge.enabled)
+        self.service.close.assert_awaited_once()
+        self.assertEqual(self.reports()[-1],set())
+
+    async def test_clipboard_writer_passes_text_unchanged(self):
+        proc=Mock(returncode=0,communicate=AsyncMock(return_value=(b'',b'')),wait=AsyncMock())
+        with patch('usb_input.asyncio.create_subprocess_exec',AsyncMock(return_value=proc)) as run:
+            await set_clipboard_text('é\n')
+        self.assertEqual(run.await_args.args[0],'wl-copy')
+        proc.communicate.assert_awaited_once_with('é\n'.encode())
+
+    async def test_clipboard_writer_reports_failure(self):
+        proc=Mock(returncode=1,communicate=AsyncMock(return_value=(b'',b'')),wait=AsyncMock())
+        with patch('usb_input.asyncio.create_subprocess_exec',AsyncMock(return_value=proc)):
+            with self.assertRaises(RuntimeError):await set_clipboard_text('x')
 
 if __name__=='__main__':unittest.main()

@@ -32,6 +32,7 @@ SPECIAL = {'SPACE': 44, 'ENTER': 40, 'KP_ENTER': 40, 'BS': 42,
            'KP_PGUP': 75, 'KP_PGDWN': 78, 'KP_LEFT': 80, 'KP_RIGHT': 79,
            'KP_UP': 82, 'KP_DOWN': 81}
 MODS = {'Ctrl': 224, 'Shift': 225, 'Alt': 226, 'Meta': 227}
+CLIPBOARD_LIMIT = 1024 * 1024  # plain text moved in either direction
 TOOLBAR_RATIO = 0.08
 HOME_STRIP = round(65535 * .96)  # home-indicator strip: bottom 4% of the screen
 
@@ -41,7 +42,7 @@ def input_bindings():
 
 async def clipboard_text():
     """Read plain text on explicit request, with bounded time and memory."""
-    limit = 1024 * 1024
+    limit = CLIPBOARD_LIMIT
     proc = await asyncio.create_subprocess_exec(
         'wl-paste', '--no-newline', '--type', 'text',
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
@@ -55,6 +56,23 @@ async def clipboard_text():
             if await proc.wait():
                 raise ValueError('clipboard-not-text')
         return data.decode('utf-8')
+    finally:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
+
+
+async def set_clipboard_text(text):
+    """Place text on the computer clipboard. wl-copy forks to keep serving it."""
+    proc = await asyncio.create_subprocess_exec(
+        'wl-copy', stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    try:
+        async with asyncio.timeout(3):
+            await proc.communicate(text.encode('utf-8'))
+        if proc.returncode:
+            raise RuntimeError('clipboard-not-set')
     finally:
         if proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
@@ -149,7 +167,8 @@ class InputBridge:
         self.gesture_task = None
         self.scrolling = False
         self.scroll_pending = 0.0
-        self.paste_cancel_until = 0.0
+        # Letter -> deadline for swallowing a cancelled Ctrl chord's plain echo.
+        self.shortcut_cancel = {}
 
     async def scroll_wheel(self):
         try:
@@ -278,6 +297,57 @@ class InputBridge:
             if self.gesture_task is asyncio.current_task():
                 self.gesture_task = None
 
+    async def copy_text(self):
+        """Copy on the phone, then move the phone clipboard text to the computer."""
+        if not self.focused or not self.enabled:
+            return
+        service = None
+        try:
+            # Let compositor modifier corrections finish, as for paste.
+            await asyncio.sleep(.06)
+            if not self.focused or not self.enabled:
+                return
+            async with asyncio.timeout(3):
+                await self.ensure_hid()
+                if self.keyboard is None:
+                    self.keyboard = await self.hid.create_keyboard_service()
+                await self.report_keys({227})
+                await self.report_keys({227, 6})  # iPhone Command+C, not Control+C.
+                await asyncio.sleep(.05)
+                await self.report_keys({227})
+                await self.report_keys(set())
+            # Give the app a moment to publish the copy before reading it back.
+            await asyncio.sleep(.1)
+            if not self.focused or not self.enabled:
+                return
+            service = PasteboardService(self.rsd)
+            async with asyncio.timeout(5):
+                await service.connect()
+                text = await service.get_text()
+            if text is None:
+                await self.command('show-text', 'No text on the phone clipboard.', 3000)
+                return
+            if len(text.encode('utf-8')) > CLIPBOARD_LIMIT:
+                raise ValueError('clipboard-too-large')
+            await set_clipboard_text(text)
+            text = None
+        except Exception as error:
+            # Never log clipboard text, replies, exception messages, or locals.
+            logging.getLogger('iphone-mirror.input').warning('Copy failed (%s)', type(error).__name__)
+            message = ('Copy needs wl-clipboard installed.' if isinstance(error, FileNotFoundError)
+                       else 'Copy failed. Use plain text up to 1 MiB and check the phone.')
+            with contextlib.suppress(Exception):
+                await self.command('show-text', message, 5000)
+        finally:
+            if self.hid is not None and self.keyboard is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(self.report_keys(set()), 1)
+            if service is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(service.close(), 1)
+            if self.gesture_task is asyncio.current_task():
+                self.gesture_task = None
+
     async def ensure_hid(self):
         if self.hid is None:
             self.hid = UniversalHIDServiceService(self.rsd)
@@ -355,22 +425,24 @@ class InputBridge:
         if not self.focused or not self.enabled:
             return
         cancelled = len(state) > 2 and state[2] == 'c'
-        # Omarchy's synthetic shortcut can briefly reissue V without Control
-        # while correcting modifiers. Consume only that cancelled chord's
-        # immediate plain-V pair, not arbitrary V typing after a paste.
-        if name in ('v', 'V') and time.monotonic() < self.paste_cancel_until:
+        # Omarchy's synthetic shortcut can briefly reissue the letter without
+        # Control while correcting modifiers. Consume only that cancelled
+        # chord's immediate plain pair, not arbitrary typing after a shortcut.
+        if name in ('v', 'V', 'c', 'C') and time.monotonic() < self.shortcut_cancel.get(name.lower(), 0.0):
             if action in ('u', 'p'):
-                self.paste_cancel_until = 0.0
+                self.shortcut_cancel[name.lower()] = 0.0
             return
-        if name in ('Ctrl+v', 'Ctrl+V'):
+        if name in ('Ctrl+v', 'Ctrl+V', 'Ctrl+c', 'Ctrl+C'):
+            letter = name[-1].lower()
             if cancelled:
-                self.paste_cancel_until = time.monotonic() + .15
+                self.shortcut_cancel[letter] = time.monotonic() + .15
                 await self.release()
                 return
             if action in ('d', 'p') and self.gesture_task is None:
-                self.paste_cancel_until = 0.0
+                self.shortcut_cancel[letter] = 0.0
                 await self.release()
-                self.gesture_task = asyncio.create_task(self.paste_text())
+                shortcut = self.paste_text() if letter == 'v' else self.copy_text()
+                self.gesture_task = asyncio.create_task(shortcut)
             return
         if cancelled:
             await self.release()

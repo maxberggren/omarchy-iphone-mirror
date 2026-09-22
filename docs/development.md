@@ -3,7 +3,7 @@
 ## Application
 
 - `mirror.py`: video session, MPV process, control socket, signals, and ordered shutdown.
-- `usb_input.py`: focused-window input, Home/Spotlight toolbar, and explicit clipboard paste.
+- `usb_input.py`: focused-window input, Home/Spotlight toolbar, and explicit clipboard copy and paste.
 - `connection.py`: Auto selection, USB transport, and authenticated Wi-Fi discovery.
 - `lifecycle.py`: instance lock, private status, and cleanup.
 - `cli.py`: installed service control.
@@ -31,7 +31,7 @@ python3 -m unittest discover -s omarchy-plugin/tests -v
 
 Installer tests use temporary HOME/XDG paths and mock systemctl, venv/pip, and host commands. Phone setup tests mock all phone operations. MPV tests use synthetic input. These tests do not establish real-phone or x86-64 compatibility.
 
-Never log clipboard contents, typed keys, pointer positions, passcodes, video frames, or arbitrary device exception contents. Clipboard paste intentionally places text on the phone clipboard; it does not save text in local diagnostic files.
+Never log clipboard contents, typed keys, pointer positions, passcodes, video frames, or arbitrary device exception contents. Clipboard paste intentionally places text on the phone clipboard and clipboard copy intentionally places phone text on the computer clipboard; neither saves text in local diagnostic files.
 
 ## Build a source release
 
