@@ -21,7 +21,16 @@ from pymobiledevice3.remote.core_device.pasteboard_service import PasteboardServ
 SPECIAL = {'SPACE': 44, 'ENTER': 40, 'KP_ENTER': 40, 'BS': 42,
            'BACKSPACE': 42, 'DEL': 76, 'INS': 73, 'TAB': 43, 'ESC': 41,
            'LEFT': 80, 'RIGHT': 79, 'UP': 82, 'DOWN': 81,
-           'HOME': 74, 'END': 77, 'PGUP': 75, 'PGDWN': 78}
+           'HOME': 74, 'END': 77, 'PGUP': 75, 'PGDWN': 78,
+           # The viewer names keypad keys instead of reporting characters. HID
+           # keypad usages are layout-independent, so the phone types them as is.
+           'KP_DIVIDE': 84, 'KP_MULTIPLY': 85, 'KP_SUBTRACT': 86, 'KP_ADD': 87,
+           'KP1': 89, 'KP2': 90, 'KP3': 91, 'KP4': 92, 'KP5': 93, 'KP6': 94,
+           'KP7': 95, 'KP8': 96, 'KP9': 97, 'KP0': 98, 'KP_DEC': 99,
+           # Keypad with NumLock off.
+           'KP_INS': 73, 'KP_DEL': 76, 'KP_HOME': 74, 'KP_END': 77,
+           'KP_PGUP': 75, 'KP_PGDWN': 78, 'KP_LEFT': 80, 'KP_RIGHT': 79,
+           'KP_UP': 82, 'KP_DOWN': 81}
 MODS = {'Ctrl': 224, 'Shift': 225, 'Alt': 226, 'Meta': 227}
 TOOLBAR_RATIO = 0.08
 HOME_STRIP = round(65535 * .96)  # home-indicator strip: bottom 4% of the screen

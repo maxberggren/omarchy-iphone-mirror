@@ -11,6 +11,14 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(key_usages('Shift+LEFT'), {225, 80})
         self.assertEqual(key_usages('ENTER'), {40})
         self.assertEqual(key_usages('F12'), set())
+        # Keypad keys arrive by name with no character; they map to HID keypad usages.
+        self.assertEqual(key_usages('KP0'), {98})
+        self.assertEqual(key_usages('KP7'), {95})
+        self.assertEqual(key_usages('KP_DEC'), {99})
+        self.assertEqual(key_usages('KP_ADD'), {87})
+        self.assertEqual(key_usages('Ctrl+KP1'), {89, 224})
+        self.assertEqual(key_usages('KP_HOME'), {74})
+        self.assertEqual(key_usages('KP_BEGIN'), set())
         self.assertEqual(key_usages('é'), set())
 
     def test_swedish_phone_layout(self):
