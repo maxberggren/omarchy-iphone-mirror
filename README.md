@@ -18,7 +18,7 @@
 > - **Overlapping keys** no longer leak Shift/Option onto the next character.
 > - **Errors are notifications** with the full message instead of a truncated OSD line, and a second launch while the first is still connecting waits instead of failing.
 > - **Developer image mounted on demand.** iOS unmounts the developer image every time the phone restarts. When the viewer starts and the phone offers no display service, it mounts the image over the current connection, USB or Wi-Fi, and reconnects. The phone must be unlocked; the first mount for an iOS version downloads from Apple, later mounts use the cached copy. It never unmounts or replaces an image. Set `"auto_mount_image": false` in `ui.json` to keep the viewer from mounting; phone setup over USB still does.
-> - **Wi-Fi discovery waits for a dozing phone.** A locked iPhone can take more than four seconds to answer discovery; the viewer now searches in short rounds for up to ~16 s and connects as soon as it answers.
+> - **Wi-Fi discovery waits for a dozing phone.** A locked iPhone's Wi-Fi sleeps and can take well over four seconds to answer discovery. The viewer now searches in short rounds for up to ~40 s, knocks directly on the address the phone last answered from (kept in `~/.local/state/iphone-mirror/wifi-endpoint.json`) since unicast wakes it more reliably than multicast, and after 8 s shows a notice suggesting you wake the phone's screen. It connects as soon as the phone answers.
 
 An on-demand USB or Wi-Fi mirror application with an optional Omarchy bar plugin.
 

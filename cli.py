@@ -193,7 +193,7 @@ def write_launch_request(connection='auto',serial=None):
     finally:
         Path(path).unlink(missing_ok=True)
 
-START_TIMEOUT = 40
+START_TIMEOUT = 60  # Wi-Fi discovery alone may take ~40 s for a dozing phone
 MOUNT_TIMEOUT = 220  # the viewer's 180 s mount budget plus tunnel reconnects
 
 

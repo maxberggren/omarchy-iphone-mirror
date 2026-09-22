@@ -1,10 +1,24 @@
 import asyncio
+import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 import connection
 
 class ConnectionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._state=tempfile.TemporaryDirectory()
+        self._env=patch.dict(os.environ,{'XDG_STATE_HOME':self._state.name})
+        self._env.start()
+        self._notice=patch('connection.show_notice')
+        self.notice=self._notice.start()
+
+    def tearDown(self):
+        self._notice.stop()
+        self._env.stop()
+        self._state.cleanup()
+
     async def test_auto_prefers_usb(self):
         d=SimpleNamespace(is_usb=True,serial='phone')
         with patch('pymobiledevice3.usbmux.list_devices',AsyncMock(return_value=[d])):
@@ -42,7 +56,7 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
              patch('connection.network_route_allowed',AsyncMock(return_value=True)), \
              patch('connection.connect_wifi',AsyncMock(return_value=provider)) as connect:
             self.assertEqual(await connection.wifi_provider(None),(provider,None))
-            connect.assert_awaited_once_with('phone','192.0.2.1',123)
+            connect.assert_awaited_once_with('phone','192.0.2.1',123,timeout=8)
 
     async def test_wifi_keeps_browsing_while_locked_phone_answers_slowly(self):
         answer=SimpleNamespace(port=123,addresses=[SimpleNamespace(full_ip='192.0.2.1')])
@@ -53,9 +67,9 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
              patch('connection.connect_wifi',AsyncMock(return_value=provider)) as connect:
             self.assertEqual(await connection.wifi_provider(None),(provider,None))
             self.assertEqual(browse.await_count,3)
-            connect.assert_awaited_once_with('phone','192.0.2.1',123)
+            connect.assert_awaited_once_with('phone','192.0.2.1',123,timeout=8)
 
-    async def test_wifi_gives_up_after_bounded_browse_rounds(self):
+    async def test_wifi_gives_up_after_bounded_browse_rounds_and_hints_once(self):
         with patch('connection.iter_remote_paired_identifiers',return_value=['phone']), \
              patch('connection.browse_remotepairing',AsyncMock(return_value=[])) as browse, \
              patch('connection.connect_wifi',AsyncMock()) as connect:
@@ -63,6 +77,39 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
                 await connection.wifi_provider(None)
             self.assertEqual(browse.await_count,connection.BROWSE_ROUNDS)
             connect.assert_not_called()
+            self.notice.assert_called_once()
+
+    async def test_wifi_knocks_on_last_known_address_alongside_discovery(self):
+        connection.save_last_endpoint('192.0.2.9',49152)
+        provider=Mock()
+        async def connect(identifier,address,port,timeout=8):
+            if address=='192.0.2.9': return provider
+            raise TimeoutError
+        with patch('connection.iter_remote_paired_identifiers',return_value=['phone']), \
+             patch('connection.browse_remotepairing',AsyncMock(return_value=[])) as browse, \
+             patch('connection.network_route_allowed',AsyncMock(return_value=True)), \
+             patch('connection.connect_wifi',AsyncMock(side_effect=connect)) as connect_mock:
+            self.assertEqual(await connection.wifi_provider(None),(provider,None))
+            self.assertEqual(browse.await_count,1)
+            connect_mock.assert_awaited_once_with('phone','192.0.2.9',49152,timeout=connection.BROWSE_ROUND_SECONDS)
+            self.notice.assert_not_called()
+
+    async def test_wifi_remembers_the_address_that_answered(self):
+        answer=SimpleNamespace(port=123,addresses=[SimpleNamespace(full_ip='192.0.2.1')])
+        with patch('connection.iter_remote_paired_identifiers',return_value=['phone']), \
+             patch('connection.browse_remotepairing',AsyncMock(return_value=[answer])), \
+             patch('connection.network_route_allowed',AsyncMock(return_value=True)), \
+             patch('connection.connect_wifi',AsyncMock(return_value=Mock())):
+            await connection.wifi_provider(None)
+        self.assertEqual(connection.load_last_endpoint(),('192.0.2.1',123))
+        self.assertEqual(oct(connection.endpoint_cache_path().stat().st_mode & 0o777),'0o600')
+
+    def test_last_endpoint_cache_rejects_bad_content(self):
+        self.assertIsNone(connection.load_last_endpoint())
+        path=connection.endpoint_cache_path(); path.parent.mkdir(parents=True)
+        for bad in ('not json','{"address":"nonsense","port":1}','{"address":"192.0.2.1","port":"1"}','{"address":"192.0.2.1","port":70000}'):
+            path.write_text(bad)
+            self.assertIsNone(connection.load_last_endpoint(),bad)
 
     async def test_no_pairing_does_not_attempt_connection(self):
         with patch('connection.iter_remote_paired_identifiers',return_value=[]), \
